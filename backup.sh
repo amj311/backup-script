@@ -191,13 +191,10 @@ calculate_upload_size() {
     # Loop through each line of the output
     while IFS= read -r line; do
       # Extract the number using grep and regex (adjust regex as needed)
-      echo "line: $line"
       size=$(echo "$line" | grep -oP '(?<=\(size )\d+(\.\d+)?[KMGTP]i?')
-      echo "size: $size"
       #   If a number was found, add it to the total sum
       if [[ -n "$size" ]]; then
         size_in_bytes=$(convert_to_bytes "$size")
-        echo "size in bytes: $size_in_bytes"
         size_in_bytes=$(echo "$total_size + $size_in_bytes" | bc)
         total_size=$size_in_bytes
       fi
@@ -231,22 +228,20 @@ perform_backup() {
     return 1
   fi
 
-  #   for LOCAL_PATH in "${!SOURCE_DIRS[@]}"; do
-  #     REMOTE_SUBDIR="${SOURCE_DIRS[$LOCAL_PATH]}"
-  #     log_message "Backing up $LOCAL_PATH to $REMOTE_NAME:$REMOTE_SUBDIR"
+    for LOCAL_PATH in "${!SOURCE_DIRS[@]}"; do
+      REMOTE_SUBDIR="${SOURCE_DIRS[$LOCAL_PATH]}"
+      log_message "Backing up $LOCAL_PATH to $REMOTE_NAME:$REMOTE_SUBDIR"
 
-  #     rclone copy "$LOCAL_PATH" "$REMOTE_NAME:$REMOTE_SUBDIR" \
-  #       --progress \
-  #       --log-file="$LOG_FILE" \
-  #       --log-level=INFO \
-  #       --transfers=4 \
-  #       --checkers=8 \
-  #       --tpslimit=10 \
-  #       --stats=10s
-  #   done
+      rclone copy "$LOCAL_PATH" "$REMOTE_NAME:$REMOTE_SUBDIR" \
+        --progress \
+        --log-file="$LOG_FILE" \
+        --log-level=INFO \
+        --transfers=4 \
+        --checkers=8 \
+        --tpslimit=10 \
+        --stats=10s
+    done
 
-  # Check storage usage after backup
-  check_drive_usage
 
   log_message "Backup completed."
 }
