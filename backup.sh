@@ -302,6 +302,6 @@ mount_drive
 
 # Run the backup process
 perform_backup
-# create_systemd_service
+create_systemd_service
 
 log_message "Setup complete. The backup will run automatically on system boot and daily thereafter."
