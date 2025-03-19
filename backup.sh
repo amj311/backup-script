@@ -1,33 +1,38 @@
 #!/bin/bash
 
+# SECRET VARAIBLES
+
+# Load env vars - don't commit ssecrets to git!
+if [[ -f .env ]]; then
+  . .env
+fi
+
+SERVICE_ACCOUNT_FILE=$SERVICE_ACCOUNT_FILE # e.g. "/path/to/your-service-account.json"
+SHARED_FOLDER_ID=$SHARED_FOLDER_ID         # e.g. "your-shared-folder-id"
+DRIVE_UUID=$DRIVE_UUID                     # e.g. "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+ALERT_EMAIL=$ALERT_EMAIL
+SENDGRID_SENDER_EMAIL=$SENDGRID_SENDER_EMAIL
+SENDGRID_API_KEY=$SENDGRID_API_KEY
+
 # Configuration variables
-EXTERNAL_DRIVE_PATH="/mnt/external"  # Change this to your external drive mount point
-REMOTE_NAME="gdrive"                 # The name of your rclone remote
-LOG_FILE="/var/log/rclone_backup.log"
-CONFIG_DIR="/root/.config/rclone"    # Where rclone config is stored
-
-# Google Drive Service Account variables
-# Place your service account JSON file on the server
-SERVICE_ACCOUNT_FILE="/path/to/your-service-account.json"  # Update this path
-SHARED_FOLDER_ID="your-shared-folder-id"  # Update this with your shared folder ID
-
-# Set drive UUID
-DRIVE_UUID="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  # Replace with your drive's UUID
+EXTERNAL_DRIVE_PATH="/Media"                   # Change this to your external drive mount point
+REMOTE_NAME="gdrive"                           # The name of your rclone remote
+LOG_FILE="/var/log/rclone_backup.log"          # The logs location
+CONFIG_PATH="/root/.config/rclone/rclone.conf" # Where rclone config is stored
 
 # Define multiple source directories and their respective remote subdirectories
 declare -A SOURCE_DIRS
 SOURCE_DIRS=(
-  ["$EXTERNAL_DRIVE_PATH/photos"]="photos_backup"
-  ["$EXTERNAL_DRIVE_PATH/videos"]="videos_backup"
-  ["$EXTERNAL_DRIVE_PATH/documents"]="documents_backup"
+  ["$EXTERNAL_DRIVE_PATH/Media/Photos"]="photos_backup"
+  ["/home/arthur/backups"]="db_backups"
 )
 
 send_email() {
   local subject="$1"
   local body="$2"
-  local to_email="your-email@example.com"
-  local from_email="your-sendgrid-verified-email@example.com"
-  local api_key="your-sendgrid-api-key"
+  local to_email="$ALERT_EMAIL"
+  local from_email="$SENDGRID_SENDER_EMAIL"
+  local api_key="$SENDGRID_API_KEY"
 
   curl -X POST \
     -H "Authorization: Bearer $api_key" \
@@ -46,39 +51,64 @@ send_email() {
     https://api.sendgrid.com/v3/mail/send
 }
 
+# Log function to send output to both stdout and log file
+log_message() {
+  local message="$1"
+  echo "$(date): $message" | tee -a "$LOG_FILE"
+}
+
+setup_rclone() {
+  # Check if rclone is installed
+  if ! command -v rclone &>/dev/null; then
+    log_message "Rclone not found. Installing..."
+    curl https://rclone.org/install.sh | bash
+    if [ $? -ne 0 ]; then
+      log_message "Failed to install rclone. Exiting."
+      exit 1
+    fi
+    log_message "Rclone installed successfully."
+  fi
+
+  # Check if rclone is configured, if not configure it
+  if [ ! -f "$CONFIG_PATH" ] || ! grep -q "\[$REMOTE_NAME\]" "$CONFIG_PATH"; then
+    configure_rclone
+  fi
+}
+
 # Mount using UUID
 mount_drive() {
   if ! mountpoint -q "$EXTERNAL_DRIVE_PATH"; then
-    echo "$(date): External drive not mounted. Attempting to mount..." >> "$LOG_FILE"
-    
+    log_message "External drive not mounted. Attempting to mount..."
+
     # Mount by UUID instead of device name
-    mount UUID="$DRIVE_UUID" "$EXTERNAL_DRIVE_PATH" 2>> "$LOG_FILE"
-    
+    mount UUID="$DRIVE_UUID" "$EXTERNAL_DRIVE_PATH" 2>>"$LOG_FILE"
+
     if [ $? -ne 0 ]; then
-      echo "$(date): Failed to mount external drive. Exiting." >> "$LOG_FILE"
+      log_message "Failed to mount external drive. Exiting."
       exit 1
     fi
-    echo "$(date): External drive mounted successfully." >> "$LOG_FILE"
+    log_message "External drive mounted successfully."
   else
-    echo "$(date): External drive already mounted." >> "$LOG_FILE"
+    log_message "External drive already mounted."
   fi
 }
 
 # Configure rclone automatically
 configure_rclone() {
-  echo "$(date): Setting up rclone configuration..." >> "$LOG_FILE"
-  
+  log_message "Setting up rclone configuration..."
+
   # Create config directory if it doesn't exist
-  mkdir -p "$CONFIG_DIR"
-  
+  mkdir -p "$(dirname "$CONFIG_PATH")"
+  touch "$CONFIG_PATH"
+
   # Check if service account file exists
   if [ ! -f "$SERVICE_ACCOUNT_FILE" ]; then
-    echo "$(date): Service account file not found at $SERVICE_ACCOUNT_FILE. Exiting." >> "$LOG_FILE"
+    log_message "Service account file not found at $SERVICE_ACCOUNT_FILE. Exiting."
     exit 1
   fi
-  
+
   # Create rclone config file with Google Drive service account
-  cat > "$CONFIG_DIR/rclone.conf" << EOL
+  cat >"$CONFIG_PATH" <<EOL
 [$REMOTE_NAME]
 type = drive
 scope = drive
@@ -86,33 +116,68 @@ service_account_file = $SERVICE_ACCOUNT_FILE
 root_folder_id = $SHARED_FOLDER_ID
 EOL
 
-  echo "$(date): Rclone configured with Google Drive service account." >> "$LOG_FILE"
+  log_message "Rclone configured with Google Drive service account."
 }
-
 
 # Check Google Drive storage usage and compare with required space
 check_drive_usage() {
-  echo "$(date): Checking Google Drive storage usage..." >> "$LOG_FILE"
-  
-  STORAGE_INFO=$(rclone about "$REMOTE_NAME": --json 2>> "$LOG_FILE")
-  
+  log_message "Checking Google Drive storage usage..."
+
+  STORAGE_INFO=$(rclone about "$REMOTE_NAME": --json 2>>"$LOG_FILE")
+
   if [ $? -ne 0 ]; then
-    echo "$(date): Failed to retrieve storage usage." >> "$LOG_FILE"
+    log_message "Failed to retrieve storage usage."
     return 1
   fi
 
   # Extract total and used storage in bytes
-  TOTAL_BYTES=$(echo "$STORAGE_INFO" | jq -r '.quota.total')
-  USED_BYTES=$(echo "$STORAGE_INFO" | jq -r '.quota.used')
+  TOTAL_BYTES=$(echo "$STORAGE_INFO" | jq -r '.total')
+  USED_BYTES=$(echo "$STORAGE_INFO" | jq -r '.used')
 
   if [[ "$TOTAL_BYTES" == "null" || "$USED_BYTES" == "null" ]]; then
-    echo "$(date): Failed to parse storage information." >> "$LOG_FILE"
+    log_message "Failed to parse storage information."
     return 1
   fi
 
   AVAILABLE_BYTES=$((TOTAL_BYTES - USED_BYTES))
-  echo "$(date): Google Drive Available Space: $AVAILABLE_BYTES bytes" >> "$LOG_FILE"
+  AVAILABLE_GIGS=$((AVAILABLE_BYTES / 1024 / 1024 / 1024))
+  PERCENT_USED=$((USED_BYTES * 100 / TOTAL_BYTES))
+  log_message "Google Drive Available Space: $AVAILABLE_GIGS GB (Used: $PERCENT_USED%)"
   export AVAILABLE_BYTES
+}
+
+convert_to_bytes() {
+  local input="$1"
+  local value=$(echo "$input" | sed -E 's/([0-9\.]+).*/\1/')
+  local unit=$(echo "$input" | sed -E 's/[0-9\.]+//' | tr -d ' ')
+  
+  case "${unit,,}" in
+    "b"|"bytes"|"")
+      multiplier=1
+      ;;
+    "kib"|"ki")
+      multiplier=1024
+      ;;
+    "mib"|"mi")
+      multiplier=$((1024*1024))
+      ;;
+    "gib"|"gi")
+      multiplier=$((1024*1024*1024))
+      ;;
+    "tib"|"ti")
+      multiplier=$((1024*1024*1024*1024))
+      ;;
+    "pib"|"pi")
+      multiplier=$((1024*1024*1024*1024*1024))
+      ;;
+    *)
+      echo "Unknown unit: $unit" >&2
+      return 1
+      ;;
+  esac
+  
+  # Use bc for floating point calculation
+  echo "$value * $multiplier" | bc
 }
 
 # Calculate the total size of files to be uploaded
@@ -120,44 +185,35 @@ calculate_upload_size() {
   local total_size=0
   for LOCAL_PATH in "${!SOURCE_DIRS[@]}"; do
     REMOTE_SUBDIR="${SOURCE_DIRS[$LOCAL_PATH]}"
-    
-    # Use rclone to simulate the copy and calculate the size of new files
-    new_files_size=$(rclone copy --dry-run --stats-one-line --stats-unit bytes --stats 0 "$LOCAL_PATH" "$REMOTE_NAME:$REMOTE_SUBDIR" 2>/dev/null | grep -oP '\d+(?= Bytes)')
-    
-    if [ -n "$new_files_size" ]; then
-      total_size=$((total_size + new_files_size))
-    fi
+
+    output=$(rclone copy --dry-run --stats-one-line --stats-unit bytes --stats 0 "$LOCAL_PATH" "$REMOTE_NAME:$REMOTE_SUBDIR" 2>&1)
+
+    # Loop through each line of the output
+    while IFS= read -r line; do
+      # Extract the number using grep and regex (adjust regex as needed)
+      echo "line: $line"
+      size=$(echo "$line" | grep -oP '(?<=\(size )\d+(\.\d+)?[KMGTP]i?')
+      echo "size: $size"
+      #   If a number was found, add it to the total sum
+      if [[ -n "$size" ]]; then
+        size_in_bytes=$(convert_to_bytes "$size")
+        echo "size in bytes: $size_in_bytes"
+        size_in_bytes=$(echo "$total_size + $size_in_bytes" | bc)
+        total_size=$size_in_bytes
+      fi
+    done <<<"$output"
   done
-  echo "$(date): Total size of new files to be uploaded: $total_size bytes" >> "$LOG_FILE"
+
+# round to nearest whole number
+  total_size=$(echo "($total_size + 0.5) / 1" | bc)
+  total_megabytes=$((total_size / 1024 / 1024))
+  log_message "Total size of new files to be uploaded: $total_megabytes MB"
   export REQUIRED_BYTES=$total_size
-}
-
-# Run backup if there is enough space
-perform_backup() {
-  echo "$(date): Starting backup..." >> "$LOG_FILE"
-  
-
-  # Proceed with backup
-  for LOCAL_PATH in "${!SOURCE_DIRS[@]}"; do
-    REMOTE_SUBDIR="${SOURCE_DIRS[$LOCAL_PATH]}"
-    echo "$(date): Backing up $LOCAL_PATH to $REMOTE_NAME:$REMOTE_SUBDIR" >> "$LOG_FILE"
-    
-    rclone copy "$LOCAL_PATH" "$REMOTE_NAME:$REMOTE_SUBDIR" \
-      --progress \
-      --log-file="$LOG_FILE" \
-      --log-level=INFO \
-      --transfers=4 \
-      --checkers=8 \
-      --tpslimit=10 \
-      --stats=10s
-  done
-
-  echo "$(date): Backup completed." >> "$LOG_FILE"
 }
 
 # Run backup
 perform_backup() {
-  echo "$(date): Starting backup..." >> "$LOG_FILE"
+  log_message "Starting backup..."
 
   # Check storage usage
   check_drive_usage
@@ -165,42 +221,42 @@ perform_backup() {
 
   # Ensure storage info was retrieved
   if [[ -z "$AVAILABLE_BYTES" || -z "$REQUIRED_BYTES" ]]; then
-    echo "$(date): Skipping backup due to missing storage data." >> "$LOG_FILE"
+    log_message "Skipping backup due to missing storage data."
     return 1
   fi
 
   # Compare available space with required space
-  if (( REQUIRED_BYTES > AVAILABLE_BYTES )); then
-    echo "$(date): Not enough space on Google Drive! Required: $REQUIRED_BYTES bytes, Available: $AVAILABLE_BYTES bytes." >> "$LOG_FILE"
+  if ((REQUIRED_BYTES > AVAILABLE_BYTES)); then
+    log_message "Not enough space on Google Drive! Required: $REQUIRED_BYTES bytes, Available: $AVAILABLE_BYTES bytes."
     return 1
   fi
-  
-  for LOCAL_PATH in "${!SOURCE_DIRS[@]}"; do
-    REMOTE_SUBDIR="${SOURCE_DIRS[$LOCAL_PATH]}"
-    echo "$(date): Backing up $LOCAL_PATH to $REMOTE_NAME:$REMOTE_SUBDIR" >> "$LOG_FILE"
-    
-    rclone copy "$LOCAL_PATH" "$REMOTE_NAME:$REMOTE_SUBDIR" \
-      --progress \
-      --log-file="$LOG_FILE" \
-      --log-level=INFO \
-      --transfers=4 \
-      --checkers=8 \
-      --tpslimit=10 \
-      --stats=10s
-  done
-  
+
+  #   for LOCAL_PATH in "${!SOURCE_DIRS[@]}"; do
+  #     REMOTE_SUBDIR="${SOURCE_DIRS[$LOCAL_PATH]}"
+  #     log_message "Backing up $LOCAL_PATH to $REMOTE_NAME:$REMOTE_SUBDIR"
+
+  #     rclone copy "$LOCAL_PATH" "$REMOTE_NAME:$REMOTE_SUBDIR" \
+  #       --progress \
+  #       --log-file="$LOG_FILE" \
+  #       --log-level=INFO \
+  #       --transfers=4 \
+  #       --checkers=8 \
+  #       --tpslimit=10 \
+  #       --stats=10s
+  #   done
+
   # Check storage usage after backup
   check_drive_usage
 
-  echo "$(date): Backup completed." >> "$LOG_FILE"
+  log_message "Backup completed."
 }
 
 # Create systemd service for auto-start
 create_systemd_service() {
   # Get the absolute path of this script
   SCRIPT_PATH=$(readlink -f "$0")
-  
-  cat > /etc/systemd/system/rclone-backup.service << EOL
+
+  cat >/etc/systemd/system/rclone-backup.service <<EOL
 [Unit]
 Description=Rclone Backup Service
 After=network-online.target
@@ -217,7 +273,7 @@ WantedBy=multi-user.target
 EOL
 
   # Create timer to run the service periodically (e.g., daily)
-  cat > /etc/systemd/system/rclone-backup.timer << EOL
+  cat >/etc/systemd/system/rclone-backup.timer <<EOL
 [Unit]
 Description=Run Rclone Backup daily
 
@@ -235,33 +291,22 @@ EOL
   systemctl daemon-reload
   systemctl enable rclone-backup.timer
   systemctl start rclone-backup.timer
-  
-  echo "$(date): Systemd service and timer created and enabled." >> "$LOG_FILE"
+
+  log_message "Systemd service and timer created and enabled."
 }
 
 # Main execution
+log_message "-------"
+log_message "Beginning backup script..."
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 
-# Check if rclone is installed
-if ! command -v rclone &> /dev/null; then
-  echo "$(date): Rclone not found. Installing..." >> "$LOG_FILE"
-  curl https://rclone.org/install.sh | bash
-  if [ $? -ne 0 ]; then
-    echo "$(date): Failed to install rclone. Exiting." >> "$LOG_FILE"
-    exit 1
-  fi
-  echo "$(date): Rclone installed successfully." >> "$LOG_FILE"
-fi
-
-# Check if rclone is configured, if not configure it
-if [ ! -f "$CONFIG_DIR/rclone.conf" ] || ! grep -q "\[$REMOTE_NAME\]" "$CONFIG_DIR/rclone.conf"; then
-  configure_rclone
-fi
+# Do preparations
+setup_rclone
+mount_drive
 
 # Run the backup process
-mount_drive
 perform_backup
-create_systemd_service
+# create_systemd_service
 
-echo "Setup complete. The backup will run automatically on system boot and daily thereafter."
+log_message "Setup complete. The backup will run automatically on system boot and daily thereafter."
