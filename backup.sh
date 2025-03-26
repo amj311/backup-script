@@ -29,10 +29,12 @@ SOURCE_DIRS=(
 
 send_email() {
   local subject="$1"
-  local body="$2"
+  local message="$2"
   local to_email="$ALERT_EMAIL"
   local from_email="$SENDGRID_SENDER_EMAIL"
   local api_key="$SENDGRID_API_KEY"
+  local login_reminder="P.S. Don't forget to log in to Sendgrid so your account doesn't deactivate!"
+  local body="$message\n\n----------------\n$login_reminder"
 
   curl -X POST \
     -H "Authorization: Bearer $api_key" \
@@ -54,7 +56,7 @@ send_email() {
 # Log function to send output to both stdout and log file
 log_message() {
   local message="$1"
-  echo "$(date): $message" | tee -a "$LOG_FILE"
+  echo "$message" | tee -a "$LOG_FILE"
 }
 
 setup_rclone() {
@@ -64,6 +66,7 @@ setup_rclone() {
     curl https://rclone.org/install.sh | bash
     if [ $? -ne 0 ]; then
       log_message "Failed to install rclone. Exiting."
+	  send_email "Hearthstone Backup Failed" "Failed to install rclone."
       exit 1
     fi
     log_message "Rclone installed successfully."
@@ -85,6 +88,7 @@ mount_drive() {
 
     if [ $? -ne 0 ]; then
       log_message "Failed to mount external drive. Exiting."
+	  send_email "Hearthstone Backup Failed" "Failed to mount external drive. Check logs for errors."
       exit 1
     fi
     log_message "External drive mounted successfully."
@@ -104,6 +108,7 @@ configure_rclone() {
   # Check if service account file exists
   if [ ! -f "$SERVICE_ACCOUNT_FILE" ]; then
     log_message "Service account file not found at $SERVICE_ACCOUNT_FILE. Exiting."
+	send_email "Hearthstone Backup Failed" "Service account file not found."
     exit 1
   fi
 
@@ -127,6 +132,7 @@ check_drive_usage() {
 
   if [ $? -ne 0 ]; then
     log_message "Failed to retrieve storage usage."
+	send_email "Hearthstone Backup Failed" "Failed to retrieve storage usage."
     return 1
   fi
 
@@ -136,6 +142,7 @@ check_drive_usage() {
 
   if [[ "$TOTAL_BYTES" == "null" || "$USED_BYTES" == "null" ]]; then
     log_message "Failed to parse storage information."
+	send_email "Hearthstone Backup Failed" "Failed to parse storage information."
     return 1
   fi
 
@@ -219,12 +226,14 @@ perform_backup() {
   # Ensure storage info was retrieved
   if [[ -z "$AVAILABLE_BYTES" || -z "$REQUIRED_BYTES" ]]; then
     log_message "Skipping backup due to missing storage data."
+	send_email "Hearthstone Backup Failed" "Skipping backup due to missing storage data."
     return 1
   fi
 
   # Compare available space with required space
   if ((REQUIRED_BYTES > AVAILABLE_BYTES)); then
     log_message "Not enough space on Google Drive! Required: $REQUIRED_BYTES bytes, Available: $AVAILABLE_BYTES bytes."
+	send_email "Hearthstone Backup Failed" "Not enough space on Google Drive! Required: $REQUIRED_BYTES bytes, Available: $AVAILABLE_BYTES bytes."
     return 1
   fi
 
@@ -242,8 +251,21 @@ perform_backup() {
         --stats=10s
     done
 
+	log_message "Backup complete: $(date)."
 
-  log_message "Backup completed."
+
+	MOUNTED_DRIVE_INFO=$(df -h "$EXTERNAL_DRIVE_PATH" | tail -1)
+	log_message "Mounted drive space: $MOUNTED_DRIVE_INFO"
+
+  # Send summary on first of month
+ if [ "$(date +%d)" == "01" ]; then
+	log_message "Sending summary email..."
+	# Get available space on mounted drive
+	MOUNTED_DRIVE_SECTION="External Drive\n--------------\n$MOUNTED_DRIVE_INFO"
+	GOOGLE_SECTION="Google Drive\n------------\nUsed: $PERCENT_USED%, Available: $AVAILABLE_GIGS GB."
+	send_email "Hearthstone Backup Summary" "Backup completed successfully.\n\n$GOOGLE_SECTION\n\n$MOUNTED_DRIVE_SECTION"
+	log_message "Summary email sent."
+ fi
 }
 
 # Create systemd service for auto-start
@@ -291,8 +313,8 @@ EOL
 }
 
 # Main execution
-log_message "-------"
-log_message "Beginning backup script..."
+log_message "\n-------------------------"
+log_message "Beginning backup script... $(date)"
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 
@@ -303,5 +325,3 @@ mount_drive
 # Run the backup process
 perform_backup
 create_systemd_service
-
-log_message "Setup complete. The backup will run automatically on system boot and daily thereafter."
