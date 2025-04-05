@@ -3,8 +3,13 @@
 # SECRET VARAIBLES
 
 # Load env vars - don't commit ssecrets to git!
-if [[ -f .env ]]; then
-  . .env
+parent_path=$( cd "$(dirname "${BASH_SOURCE[0]}")" ; pwd -P )
+
+cd "$parent_path"
+ENV_FILE=.env
+
+if [[ -f $ENV_FILE ]]; then
+  . $ENV_FILE
 fi
 
 SERVICE_ACCOUNT_FILE=$SERVICE_ACCOUNT_FILE # e.g. "/path/to/your-service-account.json"
@@ -13,6 +18,7 @@ DRIVE_UUID=$DRIVE_UUID                     # e.g. "xxxxxxxx-xxxx-xxxx-xxxx-xxxxx
 ALERT_EMAIL=$ALERT_EMAIL
 SENDGRID_SENDER_EMAIL=$SENDGRID_SENDER_EMAIL
 SENDGRID_API_KEY=$SENDGRID_API_KEY
+
 
 # Configuration variables
 EXTERNAL_DRIVE_PATH="/Media"                   # Change this to your external drive mount point
@@ -258,7 +264,7 @@ perform_backup() {
 	log_message "Mounted drive space: $MOUNTED_DRIVE_INFO"
 
   # Send summary on first of month
- if [ "$(date +%d)" == "01" ]; then
+ if [ "$(date +%d)" == "05" ]; then
 	log_message "Sending summary email..."
 	# Get available space on mounted drive
 	MOUNTED_DRIVE_SECTION="External Drive\n--------------\n$MOUNTED_DRIVE_INFO"
@@ -313,7 +319,8 @@ EOL
 }
 
 # Main execution
-log_message "\n-------------------------"
+log_message ""
+log_message "-------------------------"
 log_message "Beginning backup script... $(date)"
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
