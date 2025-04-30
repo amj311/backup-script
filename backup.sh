@@ -277,7 +277,7 @@ perform_backup() {
 # Create systemd service for auto-start
 create_systemd_service() {
   # Get the absolute path of this script
-  SCRIPT_PATH=$(readlink -f "$0")
+  SCRIPT_PATH="$parent_path/backup.sh"
 
   cat >/etc/systemd/system/rclone-backup.service <<EOL
 [Unit]
